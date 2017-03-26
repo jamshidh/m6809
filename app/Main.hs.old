@@ -1,0 +1,496 @@
+
+import Control.Monad
+import Data.Bits
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Base16 as B16
+import Data.Word
+import Data.Word8
+import Numeric
+
+type ROM = B.ByteString
+
+class Format a where
+  format::a->String
+
+data Pointer =
+  Pointer1 Word8
+  | Pointer2 Word8 Word8
+  | Absolute Word16 deriving (Show)
+
+instance Format Pointer where
+  format (Absolute x) = "Abs:0x" ++ showHex x ""
+  format x = show x
+
+data Value =
+  Value1 Word8
+  | Value2 Word8 Word8
+  | Direct1 Word8
+  | Direct2 Word16
+  | Extend Word16
+  | Immediate1 Word8
+  | Immediate2 Word16
+  | Index (Maybe (Int, String)) String Int
+  | IndexAddress deriving (Show)
+
+byteToIndex::Word8->Value
+byteToIndex v =
+  case [testBit v 4, testBit v 3, testBit v 2, testBit v 1, testBit v 0] of
+   [True, True, True, False, False] -> Index (Just (-1, "7 bit offset")) "PC" 0
+   [True, True, True, True, True] -> IndexAddress
+   _ -> Index other name inc
+  where
+    name =
+      case [testBit v 6, testBit v 5] of
+       [False, False] -> "X"
+       [False, True] -> "Y"
+       [True, False] -> "U"
+       [True, True] -> "S"
+    (address, other, inc) = 
+      case [testBit v 4, testBit v 3, testBit v 2, testBit v 1, testBit v 0] of
+       [False, False, False, False, False] -> (False, Nothing, 1)
+       [False, False, False, True, False] -> (False, Nothing, -1)
+       [False, False, True, False, False] -> (False, Nothing, 0)
+       [False, False, False, False, True] -> (False, Nothing, 2)
+       [False, False, True, False, True] -> (False, Just (0, "B"), 0)
+       [False, False, False, True, True] -> (False, Nothing, -2)
+       x -> error $ "missing case in byteToIndex: " ++ show x
+
+
+      
+instance Format Value where
+  format (Direct1 x) = "D:" ++ showHex x ""
+  format (Direct2 x) = "D:" ++ showHex x ""
+  format (Extend x) = "L" ++ showHex x ""
+  format (Immediate1 x) = "#$" ++ showHex x ""
+  format (Immediate2 x) = "#$" ++ showHex x ""
+  format (Index Nothing name 1) = "," ++ name ++ "+"
+  format (Index other name 1) = show other ++ "," ++ name ++ "+"
+  format x = show x
+
+toDirect2::Word8->Word8->Value
+toDirect2 x y = Direct2 $ fromIntegral x*256 + fromIntegral y
+
+toImmediate2::Word8->Word8->Value
+toImmediate2 x y = Immediate2 $ fromIntegral x*256 + fromIntegral y
+
+toExtend::Word8->Word8->Value
+toExtend x y = Extend $ fromIntegral x*256 + fromIntegral y
+
+data Something =
+  Something1 Word8
+  | Something2 Word8 Word8 deriving (Show)
+
+data Opcode =
+  ABX
+  | ADCA Value
+  | ADCB Value
+  | ADDA Value
+  | ADDB Value
+  | ADDD Value
+  | ANDA Value
+  | ANDB Value
+  | ANDCC Value
+  | ASR Value
+  | ASRA
+  | ASRB
+  | BCC Value
+  | BCS Value
+  | BGE Value
+  | BGT Value
+  | BEQ Value
+  | BHI Value
+  | BITA Value
+  | BITB Value
+  | BLE Value
+  | BLS Value
+  | BLT Value
+  | BMI Value
+  | BNE Value
+  | BRN Value
+  | BPL Value
+  | BRA Value
+  | BSR Value
+  | BVC Value
+  | BVS Value
+  | CLR Value
+  | CLRA
+  | CLRB
+  | CMPA Value
+  | CMPB Value
+  | CMPX Value
+  | COM Value
+  | COMA
+  | COMB
+  | CWAI Word8
+  | DAA
+  | DEC Value
+  | DECA
+  | DECB
+  | EORA Value
+  | EORB Value
+  | EXG
+  | INC Value
+  | INCA
+  | INCB
+  | JMP Value
+  | JSR Value
+  | LBRA Value
+  | LBSR Value
+  | LEAU Word8
+  | LEAX Something
+  | LEAS Something
+  | LDA Value
+  | LDB Value
+  | LDX Value
+  | LDD Value
+  | LDS Word8 Word8 Word8
+  | LDU Value
+  | LEAY Word8 Word8
+  | LSL Value
+  | LSLA
+  | LSLB
+  | LSR Value
+  | LSRA
+  | LSRB
+  | MUL
+  | NEG Value
+  | NEGA
+  | NEGB
+  | NOP
+  | ORA Value
+  | ORB Value
+  | ORCC Value
+  | PSHS Word8
+  | PSHU Word8
+  | PULS Word8
+  | PULU Word8
+  | RESET
+  | ROL Value
+  | ROLA
+  | ROLB
+  | ROR Value
+  | RORA
+  | RORB
+  | RTI
+  | RTS
+  | SBCA Value
+  | SBCB Value
+  | SEX
+  | STA Value
+  | STB Value
+  | STD Value
+  | STU Value
+  | STX Value
+  | SUBA Value
+  | SUBB Value
+  | SUBD Value
+  | SWI
+  | SYNC
+  | TFR Word8
+  | TST Value
+  | TSTA
+  | TSTB
+  | Page1 Opcode
+  | Page2 Opcode
+  | Illegal deriving (Show)
+
+instance Format Opcode where
+  format (BCC p) = "BCC " ++ format p
+  format (BCS p) = "BCS " ++ format p
+  format (BGE p) = "BGE " ++ format p
+  format (BGT p) = "BGT " ++ format p
+  format (BEQ p) = "BEQ " ++ format p
+  format (BHI p) = "BHI " ++ format p
+  format (BLE p) = "BLE " ++ format p
+  format (BLS p) = "BLS " ++ format p
+  format (BLT p) = "BLT " ++ format p
+  format (BMI p) = "BMI " ++ format p
+  format (BNE p) = "BNE " ++ format p
+  format (BRN p) = "BRN " ++ format p
+  format (BPL p) = "BPL " ++ format p
+  format (BRA p) = "BRA " ++ format p
+  format (BSR p) = "BSR " ++ format p
+  format (BVC p) = "BVC " ++ format p
+  format (BVS p) = "BVS " ++ format p
+  format (CMPX p) = "CMPX " ++ format p
+  format (JMP p) = "JMP " ++ format p
+  format (JSR p) = "JSR " ++ format p
+  format (SUBA v) = "SUBA " ++ format v
+  format (LDA v) = "LDA " ++ format v
+  format (LDB v) = "LDB " ++ format v
+  format (LDX v) = "LDX " ++ format v
+  format (STB v) = "STB " ++ format v
+  format (STX v) = "STX " ++ format v
+  format (Page1 v) = "Page1 " ++ format v
+  format (Page2 v) = "Page2 " ++ format v
+  format x = show x
+                             
+bytesToOpcode::[Word8]->(Opcode, Int)
+bytesToOpcode (0x00:v:_) = (NEG $ Direct1 v, 2)
+bytesToOpcode (0x01:_) = (Illegal, 1)
+bytesToOpcode (0x02:_) = (Illegal, 1)
+bytesToOpcode (0x03:v:_) = (COM $ Direct1 v, 2)
+bytesToOpcode (0x04:v:_) = (LSR $ Direct1 v, 2)
+bytesToOpcode (0x05:_) = (Illegal, 1)
+bytesToOpcode (0x06:v:_) = (ROR $ Direct1 v, 2)
+bytesToOpcode (0x07:v:_) = (ASR $ Direct1 v, 2)
+bytesToOpcode (0x08:v:_) = (LSL $ Direct1 v, 2)
+bytesToOpcode (0x09:v:_) = (ROL $ Direct1 v, 2)
+bytesToOpcode (0x0a:v:_) = (DEC $ Direct1 v, 2)
+bytesToOpcode (0x0b:_) = (Illegal, 1)
+bytesToOpcode (0x0c:v:_) = (INC $ Direct1 v, 2)
+bytesToOpcode (0x0d:v:_) = (TST $ Direct1 v, 2)
+bytesToOpcode (0x0e:v:_) = (JMP $ Direct1 v, 2)
+bytesToOpcode (0x0f:v:_) = (CLR $ Direct1 v, 2)
+bytesToOpcode (0x10:rest) = (Page1 o, used+1)
+                            where (o, used) = bytesToOpcode rest
+bytesToOpcode (0x11:rest) = (Page2 o, used+1)
+                            where (o, used) = bytesToOpcode rest
+bytesToOpcode (0x12:_) = (NOP, 1)
+bytesToOpcode (0x13:_) = (SYNC, 1)
+bytesToOpcode (0x14:_) = (Illegal, 1)
+bytesToOpcode (0x15:_) = (Illegal, 1)
+bytesToOpcode (0x16:v1:v2:_) = (LBRA $ toDirect2 v1 v2, 3)
+bytesToOpcode (0x17:v1:v2:_) = (LBSR $ toDirect2 v1 v2, 3)
+bytesToOpcode (0x18:_) = (Illegal, 1)
+bytesToOpcode (0x19:_) = (DAA, 1)
+bytesToOpcode (0x1a:v:_) = (ORCC $ Immediate1 v, 2)
+bytesToOpcode (0x1b:_) = (Illegal, 1)
+bytesToOpcode (0x1c:v:_) = (ANDCC $ Immediate1 v, 2)
+bytesToOpcode (0x1d:_) = (SEX, 1)
+bytesToOpcode (0x1e:_) = (EXG, 1)
+bytesToOpcode (0x1f:v:_) = (TFR v, 2)
+bytesToOpcode (0x20:v:_) = (BRA $ Direct1 v, 2)
+bytesToOpcode (0x21:v:_) = (BRN $ Direct1 v, 2)
+bytesToOpcode (0x22:v:_) = (BHI $ Direct1 v, 2)
+bytesToOpcode (0x23:v:_) = (BLS $ Direct1 v, 2)
+bytesToOpcode (0x24:v:_) = (BCC $ Direct1 v, 2)
+bytesToOpcode (0x25:v:_) = (BCS $ Direct1 v, 2)
+bytesToOpcode (0x26:v:_) = (BNE $ Direct1 v, 2)
+bytesToOpcode (0x27:v:_) = (BEQ $ Direct1 v, 2)
+bytesToOpcode (0x28:v:_) = (BVC $ Direct1 v, 2)
+bytesToOpcode (0x29:v:_) = (BVS $ Direct1 v, 2)
+bytesToOpcode (0x2a:v:_) = (BPL $ Direct1 v, 2)
+bytesToOpcode (0x2b:v:_) = (BMI $ Direct1 v, 2)
+bytesToOpcode (0x2c:v:_) = (BGE $ Direct1 v, 2)
+bytesToOpcode (0x2d:v:_) = (BLT $ Direct1 v, 2)
+bytesToOpcode (0x2e:v:_) = (BGT $ Direct1 v, 2)
+bytesToOpcode (0x2f:v:_) = (BLE $ Direct1 v, 2)
+bytesToOpcode (0x30:1:_) = (LEAX $ Something1 1, 2)
+bytesToOpcode (0x30:0x1f:_) = (LEAX $ Something1 0x1f, 2)
+bytesToOpcode (0x30:0x89:v1:v2:_) = (LEAX $ Something2 v1 v2, 4)
+bytesToOpcode (0x31:v1:v2:_) = (LEAY v1 v2, 3)
+bytesToOpcode (0x32:v1:v2:_) = (LEAS $ Something2 v1 v2, 3)
+bytesToOpcode (0x33:v:_) = (LEAU v, 2)
+bytesToOpcode (0x34:v:_) = (PSHS v, 2)
+bytesToOpcode (0x35:v:_) = (PULS v, 2)
+bytesToOpcode (0x36:v:_) = (PSHU v, 2)
+bytesToOpcode (0x37:v:_) = (PSHU v, 2)
+bytesToOpcode (0x38:_) = (Illegal, 1)
+bytesToOpcode (0x39:_) = (RTS, 1)
+bytesToOpcode (0x3a:_) = (ABX, 1)
+bytesToOpcode (0x3b:_) = (RTI, 1)
+bytesToOpcode (0x3c:v:_) = (CWAI v, 2)
+bytesToOpcode (0x3d:_) = (MUL, 1)
+bytesToOpcode (0x3e:_) = (RESET, 1)
+bytesToOpcode (0x3f:_) = (SWI, 1)
+bytesToOpcode (0x40:_) = (NEGA, 1)
+bytesToOpcode (0x41:_) = (Illegal, 1)
+bytesToOpcode (0x42:_) = (Illegal, 1)
+bytesToOpcode (0x43:_) = (COMA, 1)
+bytesToOpcode (0x44:_) = (LSRA, 1)
+bytesToOpcode (0x45:_) = (Illegal, 1)
+bytesToOpcode (0x46:_) = (RORA, 1)
+bytesToOpcode (0x47:_) = (ASRA, 1)
+bytesToOpcode (0x48:_) = (LSLA, 1)
+bytesToOpcode (0x49:_) = (ROLA, 1)
+bytesToOpcode (0x4a:_) = (DECA, 1)
+bytesToOpcode (0x4b:_) = (Illegal, 1)
+bytesToOpcode (0x4c:_) = (INCA, 1)
+bytesToOpcode (0x4d:_) = (TSTA, 1)
+bytesToOpcode (0x4e:_) = (Illegal, 1)
+bytesToOpcode (0x4f:_) = (CLRA, 1)
+bytesToOpcode (0x50:_) = (NEGB, 1)
+bytesToOpcode (0x51:_) = (Illegal, 1)
+bytesToOpcode (0x52:_) = (Illegal, 1)
+bytesToOpcode (0x53:_) = (COMB, 1)
+bytesToOpcode (0x54:_) = (LSRB, 1)
+bytesToOpcode (0x55:_) = (Illegal, 1)
+bytesToOpcode (0x56:_) = (RORB, 1)
+bytesToOpcode (0x57:_) = (ASRB, 1)
+bytesToOpcode (0x58:_) = (LSLB, 1)
+bytesToOpcode (0x59:_) = (ROLB, 1)
+bytesToOpcode (0x5a:_) = (DECB, 1)
+bytesToOpcode (0x5b:_) = (Illegal, 1)
+bytesToOpcode (0x5c:_) = (INCB, 1)
+bytesToOpcode (0x5d:_) = (TSTB, 1)
+bytesToOpcode (0x5e:_) = (Illegal, 1)
+bytesToOpcode (0x5f:_) = (CLRB, 1)
+bytesToOpcode (0x6a:v:_) = (DEC $ byteToIndex v, 2)
+bytesToOpcode (0x6e:v:_) = (JMP $ byteToIndex v, 2)
+bytesToOpcode (0x6f:v:_) = (CLR $ byteToIndex v, 2)
+bytesToOpcode (0x70:v1:v2:_) = (NEG $ toExtend v1 v2, 3)
+bytesToOpcode (0x71:_) = (Illegal, 1)
+bytesToOpcode (0x72:_) = (Illegal, 1)
+bytesToOpcode (0x73:v1:v2:_) = (COM $ toExtend v1 v2, 3)
+bytesToOpcode (0x74:v1:v2:_) = (LSR $ toExtend v1 v2, 3)
+bytesToOpcode (0x75:_) = (Illegal, 1)
+bytesToOpcode (0x76:v1:v2:_) = (ROR $ toExtend v1 v2, 3)
+bytesToOpcode (0x77:v1:v2:_) = (ASR $ toExtend v1 v2, 3)
+bytesToOpcode (0x78:v1:v2:_) = (LSL $ toExtend v1 v2, 3)
+bytesToOpcode (0x79:v1:v2:_) = (ROL $ toExtend v1 v2, 3)
+bytesToOpcode (0x7a:v1:v2:_) = (DEC $ toExtend v1 v2, 3)
+bytesToOpcode (0x7b:_) = (Illegal, 1)
+bytesToOpcode (0x7c:v1:v2:_) = (TST $ toExtend v1 v2, 3)
+bytesToOpcode (0x7d:v1:v2:_) = (TST $ toExtend v1 v2, 3)
+bytesToOpcode (0x7e:v1:v2:_) = (JMP $ toExtend v1 v2, 3)
+bytesToOpcode (0x7f:v1:v2:_) = (CLR $ toExtend v1 v2, 3)
+bytesToOpcode (0x80:v:_) = (SUBA $ Immediate1 v, 2)
+bytesToOpcode (0x81:v:_) = (CMPA $ Immediate1 v, 2)
+bytesToOpcode (0x84:v:_) = (ANDA $ Immediate1 v, 2)
+bytesToOpcode (0x86:v:_) = (LDA $ Immediate1 v, 2)
+bytesToOpcode (0x8a:v:_) = (ORA $ Immediate1 v, 2)
+bytesToOpcode (0x8c:v1:v2:_) = (CMPX $ toDirect2 v1 v2, 3)
+bytesToOpcode (0x8d:v:_) = (BSR $ Direct1 v, 2)
+bytesToOpcode (0x8e:v1:v2:_) = (LDX $ toImmediate2 v1 v2, 3)
+bytesToOpcode (0x90:v:_) = (SUBA $ Direct1 v, 2)
+bytesToOpcode (0x91:v:_) = (CMPA $ Direct1 v, 2)
+bytesToOpcode (0x92:v:_) = (SBCA $ Direct1 v, 2)
+bytesToOpcode (0x93:v:_) = (SUBD $ Direct1 v, 2)
+bytesToOpcode (0x94:v:_) = (ANDA $ Direct1 v, 2)
+bytesToOpcode (0x95:v:_) = (BITA $ Direct1 v, 2)
+bytesToOpcode (0x96:v:_) = (LDA $ Direct1 v, 2)
+bytesToOpcode (0x97:v:_) = (STA $ Direct1 v, 2)
+bytesToOpcode (0x98:v:_) = (EORA $ Direct1 v, 2)
+bytesToOpcode (0x99:v:_) = (ADCA $ Direct1 v, 2)
+bytesToOpcode (0x9a:v:_) = (ORA $ Direct1 v, 2)
+bytesToOpcode (0x9b:v:_) = (ADDA $ Direct1 v, 2)
+bytesToOpcode (0x9c:v:_) = (CMPX $ Direct1 v, 2)
+bytesToOpcode (0x9d:v:_) = (JSR $ Direct1 v, 2)
+bytesToOpcode (0x9e:v:_) = (LDX $ Direct1 v, 2)
+bytesToOpcode (0x9f:v:_) = (STX $ Direct1 v, 2)
+bytesToOpcode (0xa0:v:_) = (SUBA $ byteToIndex v, 2)
+bytesToOpcode (0xa1:v:_) = (CMPA $ byteToIndex v, 2)
+bytesToOpcode (0xa2:v:_) = (SBCA $ byteToIndex v, 2)
+bytesToOpcode (0xa3:v:_) = (SUBD $ byteToIndex v, 2)
+bytesToOpcode (0xa4:v:_) = (ANDA $ byteToIndex v, 2)
+bytesToOpcode (0xa5:v:_) = (BITA $ byteToIndex v, 2)
+bytesToOpcode (0xa6:v:_) = (LDA $ byteToIndex v, 2)
+bytesToOpcode (0xa7:v:_) = (STA $ byteToIndex v, 2)
+bytesToOpcode (0xa8:v:_) = (EORA $ byteToIndex v, 2)
+bytesToOpcode (0xa9:v:_) = (ADCA $ byteToIndex v, 2)
+bytesToOpcode (0xaa:v:_) = (ORA $ byteToIndex v, 2)
+bytesToOpcode (0xab:v:_) = (ADDA $ byteToIndex v, 2)
+bytesToOpcode (0xac:v:_) = (CMPX $ byteToIndex v, 2)
+bytesToOpcode (0xad:v:_) = (JSR $ byteToIndex v, 2)
+bytesToOpcode (0xae:v:_) = (LDX $ Value1 v, 2)
+bytesToOpcode (0xaf:v:_) = (STX $ Value1 v, 2)
+bytesToOpcode (0xb0:v1:v2:_) = (SUBA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb1:v1:v2:_) = (CMPA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb2:v1:v2:_) = (SBCA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb3:v1:v2:_) = (SUBD $ toExtend v1 v2, 3)
+bytesToOpcode (0xb4:v1:v2:_) = (ANDA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb5:v1:v2:_) = (BITA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb6:v1:v2:_) = (LDA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb7:v1:v2:_) = (STA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb8:v1:v2:_) = (EORA $ toExtend v1 v2, 3)
+bytesToOpcode (0xb9:v1:v2:_) = (ADCA $ toExtend v1 v2, 3)
+bytesToOpcode (0xba:v1:v2:_) = (ORA $ toExtend v1 v2, 3)
+bytesToOpcode (0xbb:v1:v2:_) = (ADDA $ toExtend v1 v2, 3)
+bytesToOpcode (0xbc:v1:v2:_) = (CMPA $ toExtend v1 v2, 3)
+bytesToOpcode (0xbd:v1:v2:_) = (JSR $ toExtend v1 v2, 3)
+bytesToOpcode (0xbe:v1:v2:_) = (LDX $ toExtend v1 v2, 3)
+bytesToOpcode (0xbf:v1:v2:_) = (STX $ toExtend v1 v2, 3)
+bytesToOpcode (0xc0:v:_) = (SUBB $ Immediate1 v, 2)
+bytesToOpcode (0xc1:v:_) = (CMPB $ Immediate1 v, 2)
+bytesToOpcode (0xc2:v:_) = (SBCB $ Immediate1 v, 2)
+bytesToOpcode (0xc3:v1:v2:_) = (ADDD $ toImmediate2 v1 v2, 2)
+bytesToOpcode (0xc4:v:_) = (ANDB $ Immediate1 v, 2)
+bytesToOpcode (0xc5:v:_) = (BITB $ Immediate1 v, 2)
+bytesToOpcode (0xc6:v:_) = (LDB $ Immediate1 v, 2)
+bytesToOpcode (0xc7:_) = error "illegal"
+bytesToOpcode (0xc8:v:_) = (EORB $ Immediate1 v, 2)
+bytesToOpcode (0xc9:v:_) = (ADCB $ Immediate1 v, 2)
+bytesToOpcode (0xca:v:_) = (ORB $ Immediate1 v, 2)
+bytesToOpcode (0xcb:v:_) = (ADDB $ Immediate1 v, 2)
+bytesToOpcode (0xcc:v1:v2:_) = (LDD $ toImmediate2 v1 v2, 3)
+bytesToOpcode (0xcd:_) = error "illegal"
+bytesToOpcode (0xce:v1:v2:_) = (LDU $ toImmediate2 v1 v2, 3)
+bytesToOpcode (0xcf:v:_) = error "illegal"
+bytesToOpcode (0xd0:v:_) = (SUBB $ Direct1 v, 2)
+bytesToOpcode (0xd1:v:_) = (CMPB $ Direct1 v, 2)
+bytesToOpcode (0xd2:v:_) = (SBCB $ Direct1 v, 2)
+bytesToOpcode (0xd3:v:_) = (ADDD $ Direct1 v, 2)
+bytesToOpcode (0xd4:v:_) = (ANDB $ Direct1 v, 2)
+bytesToOpcode (0xd5:v:_) = (BITB $ Direct1 v, 2)
+bytesToOpcode (0xd6:v:_) = (LDB $ Direct1 v, 2)
+bytesToOpcode (0xd7:v:_) = (STB $ Direct1 v, 2)
+bytesToOpcode (0xd8:v:_) = (EORB $ Direct1 v, 2)
+bytesToOpcode (0xd9:v:_) = (ADCB $ Direct1 v, 2)
+bytesToOpcode (0xda:v:_) = (ORB $ Direct1 v, 2)
+bytesToOpcode (0xdb:v:_) = (ADDB $ Direct1 v, 2)
+bytesToOpcode (0xdc:v:_) = (LDD $ Direct1 v, 2)
+bytesToOpcode (0xdd:v:_) = (STD $ Direct1 v, 2)
+bytesToOpcode (0xde:v:_) = (LDU $ Direct1 v, 2)
+bytesToOpcode (0xdf:v:_) = (STU $ Direct1 v, 2)
+bytesToOpcode (0xe0:v:_) = (SUBB $ byteToIndex v, 2)
+bytesToOpcode (0xe1:v:_) = (CMPB $ byteToIndex v, 2)
+bytesToOpcode (0xe2:v:_) = (SBCB $ byteToIndex v, 2)
+bytesToOpcode (0xe3:v:_) = (ADDD $ byteToIndex v, 2)
+bytesToOpcode (0xe4:v:_) = (ANDB $ byteToIndex v, 2)
+bytesToOpcode (0xe5:v:_) = (BITB $ byteToIndex v, 2)
+bytesToOpcode (0xe6:v:_) = (LDB $ byteToIndex v, 2)
+bytesToOpcode (0xe7:v:_) = (STB $ byteToIndex v, 2)
+bytesToOpcode (0xe8:v:_) = (EORB $ byteToIndex v, 2)
+bytesToOpcode (0xe9:v:_) = (ADCB $ byteToIndex v, 2)
+bytesToOpcode (0xea:v:_) = (ORB $ byteToIndex v, 2)
+bytesToOpcode (0xeb:v:_) = (ADDB $ byteToIndex v, 2)
+bytesToOpcode (0xec:v:_) = (LDD $ byteToIndex v, 2)
+bytesToOpcode (0xed:v:_) = (STD $ byteToIndex v, 2)
+bytesToOpcode (0xee:v:_) = (LDU $ byteToIndex v, 2)
+bytesToOpcode (0xef:v:_) = (STU $ byteToIndex v, 2)
+bytesToOpcode (0xf0:v1:v2:_) = (SUBB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf1:v1:v2:_) = (CMPB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf2:v1:v2:_) = (SBCB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf3:v1:v2:_) = (ADDD $ toExtend v1 v2, 3)
+bytesToOpcode (0xf4:v1:v2:_) = (ANDB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf5:v1:v2:_) = (BITB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf6:v1:v2:_) = (LDB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf7:v1:v2:_) = (STB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf8:v1:v2:_) = (EORB $ toExtend v1 v2, 3)
+bytesToOpcode (0xf9:v1:v2:_) = (ADCB $ toExtend v1 v2, 3)
+bytesToOpcode (0xfa:v1:v2:_) = (ORB $ toExtend v1 v2, 3)
+bytesToOpcode (0xfb:v1:v2:_) = (ADDB $ toExtend v1 v2, 3)
+bytesToOpcode (0xfc:v1:v2:_) = (LDD $ toExtend v1 v2, 3)
+bytesToOpcode (0xfd:v1:v2:_) = (STD $ toExtend v1 v2, 3)
+bytesToOpcode (0xfe:v1:v2:_) = (LDU $ toExtend v1 v2, 3)
+bytesToOpcode (0xff:v1:v2:_) = (STU $ toExtend v1 v2, 3)
+
+
+
+
+bytesToOpcode (x:v1:v2:v3:v4:_) = error $ "unknown opcode: 0x" ++ showHex x "" ++ "    " ++ showHex v1 "" ++ showHex v2 "" ++ showHex v3 "" ++ showHex v4 "" 
+
+getOpcodeAt::ROM->Int->(Opcode, Int)
+getOpcodeAt rom p = bytesToOpcode (B.unpack $ B.drop p rom)
+  
+--getOPCode::Int->B.ByteString
+--getOPCode p = 
+
+getOpcodesAt::ROM->Int->Int->[(Int, B.ByteString, Opcode)]
+getOpcodesAt _ _ 0 = []
+getOpcodesAt rom p numberOfOpcodes =
+  (p, B.take used $ B.drop p rom, o):getOpcodesAt rom (p+used) (numberOfOpcodes - 1)
+  where
+    (o, used) = getOpcodeAt rom p
+
+main :: IO ()
+main = do
+  rom <- fmap (B.replicate 0x8000 0 `B.append`) $ B.readFile "COCO.ROM"
+  --let startP = 0xa00e
+  --let startP = 0xa076
+  --let startP = 0xa095
+  --let startP = 0xa0f8
+  let startP = 0xa928 --clear screen
+  forM_ (getOpcodesAt rom startP 200) $ \(p, bytes, o) -> putStrLn $ "  " ++ showHex p "" ++ " " ++ BC.unpack (B16.encode bytes) ++ replicate (2*(6-B.length bytes)) ' ' ++ format o
